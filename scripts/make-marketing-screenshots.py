@@ -1,13 +1,19 @@
 """Build App Store marketing screenshots: headline above a framed device shot.
 
-Same structure as the previous listing's shots, rebuilt in the app's current
-identity — cream rather than the old dark/gold, because the app itself is cream
-now and a dark listing would misrepresent it.
+Rendered natively at every portrait size App Store Connect accepts for an
+iPhone slot, rather than resampling one size into the others, so the type stays
+crisp whichever slot you are filling.
+
+Which slot wants which size is not guessable from the slot's name — a listing
+tab reading "iPhone with Dynamic Island (medium display)" does not tell you
+whether it means 1206x2622 or 1179x2556 — so render them all and drop in the
+one the upload panel asks for.
 
 Type is San Francisco at weight 800, which is the app's own display token
 (fontWeight '800', letterSpacing -1.4 at 40px), rendered with matching negative
-tracking so the headline looks like the app's own voice rather than a generic
-caption.
+tracking so the headline looks like the app's voice rather than a caption.
+
+    python3 scripts/make-marketing-screenshots.py store-screenshots OUTDIR
 """
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import os
@@ -15,9 +21,16 @@ import sys
 
 SRC = sys.argv[1]
 OUT = sys.argv[2]
-os.makedirs(OUT, exist_ok=True)
 
-W, H = 1320, 2868
+SIZES = [
+    (1320, 2868, '6.9" — 16/17 Pro Max'),
+    (1290, 2796, '6.9"/6.7" alt — 14/15/16 Pro Max'),
+    (1284, 2778, '6.7" — 12/13/14 Plus, 12/13 Pro Max'),
+    (1242, 2688, '6.5" — XS Max, 11 Pro Max'),
+    (1206, 2622, '6.3" — 16/17 Pro'),
+    (1179, 2556, '6.1" — 14/15/16'),
+]
+BASE_H = 2868                      # the height the geometry below was tuned at
 
 # --- theme/colors.ts -------------------------------------------------------
 BG = '#F5F3EF'
@@ -25,16 +38,20 @@ INK = '#1A1917'
 SECONDARY = '#8A867E'
 
 ACCENT = {
-    'coin':    '#DFAE3C',
-    'dice':    '#A89E8B',
-    'cards':   '#C4453B',
-    'wheel':   '#C79A4E',
-    'numbers': '#8FA3C9',
-    'home':    '#DFAE3C',
-    'history': '#8FA3C9',
+    'coin': '#DFAE3C', 'dice': '#A89E8B', 'cards': '#C4453B',
+    'wheel': '#C79A4E', 'numbers': '#8FA3C9',
+    'home': '#DFAE3C', 'history': '#8FA3C9',
 }
 
 FONT = '/System/Library/Fonts/SFNS.ttf'
+
+# --- geometry at BASE_H; every value scales from here ----------------------
+G = dict(
+    margin=104, wordmark_y=150, mark_size=34, gap_mark=86,
+    head_size=100, head_track=-3.5, head_lead=112,
+    sub_size=40, gap_sub=22, gap_dev=86,
+    dev_w=1000, bezel=13, bottom=118, shadow_dy=20, shadow_blur=34,
+)
 
 
 def hex2rgb(h):
@@ -64,26 +81,20 @@ def saturation(rgb):
 def text_target(hex_color):
     """A hue can carry a headline at 3:1; a near-neutral cannot.
 
-    Dice's accent is a taupe. At 3:1 it reads as washed-out grey beside the
-    cards red, so neutrals go darker until they look like a deliberate dark
-    warm grey rather than a mistake.
+    3:1 is the bar for large text, which a 100px bold headline is — holding it
+    to the 4.5:1 that body copy needs turns the gold olive for no benefit.
+    Dice's accent is a taupe, though, and at 3:1 it reads as washed-out grey
+    beside the cards red, so neutrals go to 4.5 and look deliberate.
     """
     return 4.5 if saturation(hex2rgb(hex_color)) < 0.25 else 3.0
 
 
-def darken_until_readable(hex_color, bg_rgb, target=3.0):
-    """Blend an accent toward ink until it is legible as large text on cream.
+def darken_until_readable(hex_color, bg_rgb, target):
+    """Blend an accent toward ink until it carries as type on cream.
 
-    The palette was tuned for fills behind a hero object, not for type. Taupe
-    dice at #A89E8B is invisible as a headline; this keeps each activity's hue
-    while making it actually readable.
-
-    3:1 is the threshold for large text (the headline is 92px bold), not the
-    4.5:1 that body copy needs. Using the stricter number here muddies gold
-    into olive for no benefit.
+    The palette was tuned for fills behind a hero object, not for text.
     """
-    rgb = hex2rgb(hex_color)
-    ink = hex2rgb(INK)
+    rgb, ink = hex2rgb(hex_color), hex2rgb(INK)
     t = 0.0
     while t <= 1.0:
         mixed = tuple(round(rgb[i] + (ink[i] - rgb[i]) * t) for i in range(3))
@@ -94,19 +105,12 @@ def darken_until_readable(hex_color, bg_rgb, target=3.0):
 
 
 def sf(size, weight=400):
-    f = ImageFont.truetype(FONT, size)
-    try:                                   # axes: Width, Optical Size, GRAD, Weight
-        f.set_variation_by_axes([100.0, float(size), 0.0, float(weight)])
+    f = ImageFont.truetype(FONT, max(size, 1))
+    try:                               # axes: Width, Optical Size, GRAD, Weight
+        f.set_variation_by_axes([100.0, float(max(size, 1)), 0.0, float(weight)])
     except Exception:
         pass
     return f
-
-
-def tracked_width(draw, text, font, tracking):
-    w = 0
-    for ch in text:
-        w += draw.textlength(ch, font=font) + tracking
-    return w - tracking if text else 0
 
 
 def draw_tracked(draw, xy, text, font, fill, tracking):
@@ -118,10 +122,10 @@ def draw_tracked(draw, xy, text, font, fill, tracking):
     return x
 
 
-def rounded_shadow(size, box, radius, blur, alpha):
-    layer = Image.new('L', size, 0)
-    ImageDraw.Draw(layer).rounded_rectangle(box, radius=radius, fill=alpha)
-    return layer.filter(ImageFilter.GaussianBlur(blur))
+def tracked_width(draw, text, font, tracking):
+    if not text:
+        return 0
+    return sum(draw.textlength(c, font=font) + tracking for c in text) - tracking
 
 
 PANELS = [
@@ -148,82 +152,82 @@ PANELS = [
          sub='On your phone, and nowhere else.'),
 ]
 
-# --- geometry --------------------------------------------------------------
-MARGIN = 104
-WORDMARK_Y = 150
-HEAD_SIZE = 100
-HEAD_TRACK = -3.5          # ~ -0.035em, the app's display tracking
-HEAD_LEAD = 112
-SUB_SIZE = 40
-DEV_W = 1000
-BEZEL = 13
+bg_rgb, ink_rgb, sec_rgb = hex2rgb(BG), hex2rgb(INK), hex2rgb(SECONDARY)
+shots = {p['src']: Image.open(os.path.join(SRC, p['src'] + '.png')).convert('RGB')
+         for p in PANELS}
 
-bg_rgb = hex2rgb(BG)
-ink_rgb = hex2rgb(INK)
-sec_rgb = hex2rgb(SECONDARY)
+for W, H in [(w, h) for w, h, _ in SIZES]:
+    label = next(l for w, h, l in SIZES if (w, h) == (W, H))
+    s = H / BASE_H
+    g = {k: (v * s if isinstance(v, (int, float)) else v) for k, v in G.items()}
+    d_out = os.path.join(OUT, f'{W}x{H}')
+    os.makedirs(d_out, exist_ok=True)
 
-f_mark = sf(34, 600)
-f_head = sf(HEAD_SIZE, 800)
-f_sub = sf(SUB_SIZE, 400)
+    f_mark = sf(round(g['mark_size']), 600)
+    f_head = sf(round(g['head_size']), 800)
+    f_sub = sf(round(g['sub_size']), 400)
 
-report = []
-for p in PANELS:
-    canvas = Image.new('RGB', (W, H), bg_rgb)
-    d = ImageDraw.Draw(canvas)
+    widest = 0
+    for p in PANELS:
+        canvas = Image.new('RGB', (W, H), bg_rgb)
+        dr = ImageDraw.Draw(canvas)
 
-    acc_hex = ACCENT[p['accent']]
-    acc_rgb, blend = darken_until_readable(acc_hex, bg_rgb, text_target(acc_hex))
+        acc_hex = ACCENT[p['accent']]
+        acc_rgb, _ = darken_until_readable(acc_hex, bg_rgb, text_target(acc_hex))
 
-    # wordmark
-    draw_tracked(d, (MARGIN, WORDMARK_Y), 'super fair odds', f_mark, sec_rgb, 0.4)
+        m = round(g['margin'])
+        draw_tracked(dr, (m, round(g['wordmark_y'])), 'super fair odds', f_mark, sec_rgb, 0.4)
 
-    # headline
-    y = WORDMARK_Y + 86
-    for i, line in enumerate(p['head']):
-        fill = acc_rgb if i == p['accent_line'] else ink_rgb
-        draw_tracked(d, (MARGIN, y), line, f_head, fill, HEAD_TRACK)
-        y += HEAD_LEAD
+        y = g['wordmark_y'] + g['gap_mark']
+        for i, line in enumerate(p['head']):
+            fill = acc_rgb if i == p['accent_line'] else ink_rgb
+            draw_tracked(dr, (m, round(y)), line, f_head, fill, g['head_track'])
+            widest = max(widest, tracked_width(dr, line, f_head, g['head_track']))
+            y += g['head_lead']
 
-    # subtitle
-    y += 22
-    draw_tracked(d, (MARGIN, y), p['sub'], f_sub, sec_rgb, -0.3)
-    y += SUB_SIZE + 86
+        y += g['gap_sub']
+        draw_tracked(dr, (m, round(y)), p['sub'], f_sub, sec_rgb, -0.3)
+        widest = max(widest, tracked_width(dr, p['sub'], f_sub, -0.3))
+        y += g['sub_size'] + g['gap_dev']
 
-    # device
-    shot = Image.open(os.path.join(SRC, p['src'] + '.png')).convert('RGB')
-    inner_w = DEV_W - 2 * BEZEL
-    inner_h = round(inner_w * shot.size[1] / shot.size[0])
-    shot = shot.resize((inner_w, inner_h), Image.LANCZOS)
+        dev_w = round(g['dev_w'])
+        bezel = max(round(g['bezel']), 1)
+        shot = shots[p['src']]
+        inner_w = dev_w - 2 * bezel
+        inner_h = round(inner_w * shot.size[1] / shot.size[0])
+        scaled = shot.resize((inner_w, inner_h), Image.LANCZOS)
 
-    dev_h = inner_h + 2 * BEZEL
-    dev_x = (W - DEV_W) // 2
-    dev_y = y
-    if dev_y + dev_h > H - 118:                # keep a little breathing room
-        dev_y = H - 118 - dev_h
-    radius = round(DEV_W * 0.125)
+        dev_h = inner_h + 2 * bezel
+        dev_x = (W - dev_w) // 2
+        dev_y = round(y)
+        if dev_y + dev_h > H - round(g['bottom']):
+            dev_y = H - round(g['bottom']) - dev_h
+        radius = round(dev_w * 0.125)
 
-    shadow = rounded_shadow((W, H), (dev_x, dev_y + 20, dev_x + DEV_W, dev_y + dev_h + 20),
-                            radius, 34, 58)
-    canvas.paste(Image.new('RGB', (W, H), (26, 25, 23)), (0, 0), shadow)
+        sh = Image.new('L', (W, H), 0)
+        ImageDraw.Draw(sh).rounded_rectangle(
+            (dev_x, dev_y + round(g['shadow_dy']),
+             dev_x + dev_w, dev_y + dev_h + round(g['shadow_dy'])),
+            radius=radius, fill=58)
+        canvas.paste(Image.new('RGB', (W, H), ink_rgb), (0, 0),
+                     sh.filter(ImageFilter.GaussianBlur(g['shadow_blur'])))
 
-    body = Image.new('RGB', (DEV_W, dev_h), (26, 25, 23))
-    mask = Image.new('L', (DEV_W, dev_h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, DEV_W - 1, dev_h - 1), radius=radius, fill=255)
+        body = Image.new('RGB', (dev_w, dev_h), ink_rgb)
+        mask = Image.new('L', (dev_w, dev_h), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, dev_w - 1, dev_h - 1),
+                                               radius=radius, fill=255)
+        im = Image.new('L', (inner_w, inner_h), 0)
+        ImageDraw.Draw(im).rounded_rectangle((0, 0, inner_w - 1, inner_h - 1),
+                                             radius=max(radius - bezel, 1), fill=255)
+        body.paste(scaled, (bezel, bezel), im)
+        canvas.paste(body, (dev_x, dev_y), mask)
 
-    inner_mask = Image.new('L', (inner_w, inner_h), 0)
-    ImageDraw.Draw(inner_mask).rounded_rectangle(
-        (0, 0, inner_w - 1, inner_h - 1), radius=radius - BEZEL, fill=255)
-    body.paste(shot, (BEZEL, BEZEL), inner_mask)
+        canvas.save(os.path.join(d_out, p['src'] + '.png'), optimize=True)
 
-    canvas.paste(body, (dev_x, dev_y), mask)
+    avail = W - 2 * round(g['margin'])
+    fit = 'ok' if widest <= avail else f'OVERFLOW by {round(widest - avail)}px'
+    total = sum(os.path.getsize(os.path.join(d_out, f)) for f in os.listdir(d_out))
+    print(f'  {W}x{H}  {label:<38} widest line {round(widest):>4}/{avail}  {fit:<8} '
+          f'{total // 1024:>5} KB')
 
-    path = os.path.join(OUT, p['src'] + '.png')
-    canvas.save(path, optimize=True)
-    report.append((p['src'], ACCENT[p['accent']], blend,
-                   contrast(acc_rgb, bg_rgb), dev_y, dev_y + dev_h,
-                   os.path.getsize(path) // 1024))
-
-print(f'{"panel":<12} {"accent":<9} {"darkened":<9} {"contrast":<9} {"device y":<14} size')
-for name, acc, blend, cr, y0, y1, kb in report:
-    print(f'  {name:<10} {acc:<9} {blend*100:>5.0f}%    {cr:>5.2f}:1   {y0:>5}-{y1:<7} {kb:>4} KB')
-print(f'\n  all panels {W}x{H}')
+print(f'\n  {len(SIZES)} sizes x {len(PANELS)} panels = {len(SIZES) * len(PANELS)} files in {OUT}/')
