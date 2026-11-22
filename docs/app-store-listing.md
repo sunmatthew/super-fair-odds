@@ -1,4 +1,4 @@
-# App Store listing copy — super fair odds v1.0.1
+# App Store listing copy — super fair odds v1.1.0
 
 Paste each block into the matching App Store Connect field. Lengths were
 checked against Apple's limits when this file was generated.
